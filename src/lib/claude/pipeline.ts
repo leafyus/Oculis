@@ -8,9 +8,8 @@ import {
   critiquePrompt,
   fixPrompt,
 } from "./prompts";
-import { FileInput, FileRanking, ScanResult, Vulnerability, Tier } from "../types";
+import { FileInput, FileRanking, Vulnerability, Tier } from "../types";
 import { TIER_LIMITS } from "../constants";
-import { updateScan } from "../store";
 
 const MODEL = "claude-sonnet-4-20250514";
 
@@ -38,9 +37,7 @@ function parseJSON<T>(text: string): T | null {
 }
 
 // Stage 1: Rank files by vulnerability likelihood
-async function rankFiles(scanId: string, files: FileInput[]): Promise<FileRanking[]> {
-  updateScan(scanId, { status: "ranking", progress: 10, currentStage: "Analyzing file structure..." });
-
+async function rankFiles(files: FileInput[]): Promise<FileRanking[]> {
   if (files.length === 1) {
     return [{ fileName: files[0].name, score: 5, reason: "Single file scan — full audit" }];
   }
@@ -57,12 +54,9 @@ async function rankFiles(scanId: string, files: FileInput[]): Promise<FileRankin
 
 // Stage 2: Multi-pass vulnerability discovery
 async function discoverVulnerabilities(
-  scanId: string,
   files: FileInput[],
   rankings: FileRanking[]
 ): Promise<Array<Omit<Vulnerability, "id" | "fixedCode" | "fixExplanation" | "confidence">>> {
-  updateScan(scanId, { status: "scanning", progress: 30, currentStage: "Scanning for vulnerabilities..." });
-
   const targetFiles = rankings.filter((r) => r.score >= 3);
   const allVulns: Array<Omit<Vulnerability, "id" | "fixedCode" | "fixExplanation" | "confidence">> = [];
 
@@ -100,10 +94,6 @@ async function discoverVulnerabilities(
         }
       }
     }
-
-    updateScan(scanId, {
-      progress: 30 + Math.round((targetFiles.indexOf(ranking) / targetFiles.length) * 30),
-    });
   }
 
   return allVulns;
@@ -111,15 +101,11 @@ async function discoverVulnerabilities(
 
 // Stage 3: Critique and verify findings
 async function critiqueFindings(
-  scanId: string,
   files: FileInput[],
   rawVulns: Array<Omit<Vulnerability, "id" | "fixedCode" | "fixExplanation" | "confidence">>
 ): Promise<Vulnerability[]> {
-  updateScan(scanId, { status: "critiquing", progress: 65, currentStage: "Verifying findings..." });
-
   if (rawVulns.length === 0) return [];
 
-  // Group vulns by file for critique
   const vulnsByFile = new Map<string, typeof rawVulns>();
   for (const v of rawVulns) {
     const existing = vulnsByFile.get(v.fileName) || [];
@@ -167,18 +153,14 @@ async function critiqueFindings(
     }
   }
 
-  updateScan(scanId, { progress: 80 });
   return verified;
 }
 
 // Stage 4: Generate fixes (Pro/Enterprise only)
 async function generateFixes(
-  scanId: string,
   files: FileInput[],
   vulnerabilities: Vulnerability[]
 ): Promise<Vulnerability[]> {
-  updateScan(scanId, { progress: 85, currentStage: "Generating fixes..." });
-
   const withFixes = [...vulnerabilities];
 
   for (const vuln of withFixes) {
@@ -194,52 +176,35 @@ async function generateFixes(
     }
   }
 
-  updateScan(scanId, { progress: 95 });
   return withFixes;
 }
 
-// Main pipeline orchestrator
-export async function runScanPipeline(scanId: string, files: FileInput[], tier: Tier): Promise<ScanResult> {
+export interface ScanPipelineResult {
+  rankings: FileRanking[];
+  vulnerabilities: Vulnerability[];
+}
+
+// Main pipeline orchestrator — runs synchronously, returns results directly
+export async function runScanPipeline(files: FileInput[], tier: Tier): Promise<ScanPipelineResult> {
   const limits = TIER_LIMITS[tier];
 
-  try {
-    // Stage 1: Rank files
-    const rankings = await rankFiles(scanId, files);
-    updateScan(scanId, { rankings });
+  // Stage 1: Rank files
+  const rankings = await rankFiles(files);
 
-    // Stage 2: Discover vulnerabilities
-    const rawVulns = await discoverVulnerabilities(scanId, files, rankings);
+  // Stage 2: Discover vulnerabilities
+  const rawVulns = await discoverVulnerabilities(files, rankings);
 
-    // Stage 3: Critique and verify
-    let vulnerabilities = await critiqueFindings(scanId, files, rawVulns);
+  // Stage 3: Critique and verify
+  let vulnerabilities = await critiqueFindings(files, rawVulns);
 
-    // Sort by severity
-    const severityOrder = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-    vulnerabilities.sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+  // Sort by severity
+  const severityOrder = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  vulnerabilities.sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
 
-    // Stage 4: Generate fixes (paid tiers only)
-    if (limits.showFixedCode && vulnerabilities.length > 0) {
-      vulnerabilities = await generateFixes(scanId, files, vulnerabilities);
-    }
-
-    const result = updateScan(scanId, {
-      status: "complete",
-      vulnerabilities,
-      rankings,
-      completedAt: new Date().toISOString(),
-      progress: 100,
-      currentStage: "Scan complete",
-    });
-
-    return result!;
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-    const result = updateScan(scanId, {
-      status: "error",
-      error: errorMessage,
-      progress: 0,
-      currentStage: "Error",
-    });
-    return result!;
+  // Stage 4: Generate fixes (paid tiers only)
+  if (limits.showFixedCode && vulnerabilities.length > 0) {
+    vulnerabilities = await generateFixes(files, vulnerabilities);
   }
+
+  return { rankings, vulnerabilities };
 }

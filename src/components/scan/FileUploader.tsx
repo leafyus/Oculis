@@ -2,10 +2,12 @@
 
 import { useCallback, useState } from "react";
 import { SUPPORTED_EXTENSIONS } from "@/lib/constants";
+import { Tier } from "@/lib/types";
 
 interface FileUploaderProps {
   onFilesSelected: (files: Array<{ name: string; content: string; language: string }>) => void;
   disabled?: boolean;
+  tier: Tier;
 }
 
 function getLanguage(fileName: string): string {
@@ -19,7 +21,12 @@ function getLanguage(fileName: string): string {
   return langMap[ext] || "text";
 }
 
-export default function FileUploader({ onFilesSelected, disabled }: FileUploaderProps) {
+function isSupportedFile(fileName: string): boolean {
+  const ext = fileName.slice(fileName.lastIndexOf("."));
+  return SUPPORTED_EXTENSIONS.includes(ext);
+}
+
+export default function FileUploader({ onFilesSelected, disabled, tier }: FileUploaderProps) {
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
@@ -29,26 +36,42 @@ export default function FileUploader({ onFilesSelected, disabled }: FileUploader
     const parsed: Array<{ name: string; content: string; language: string }> = [];
 
     for (const file of Array.from(fileList)) {
-      const ext = file.name.slice(file.name.lastIndexOf("."));
-      if (!SUPPORTED_EXTENSIONS.includes(ext)) {
-        setError(`Unsupported file: ${file.name}. Supported: ${SUPPORTED_EXTENSIONS.join(", ")}`);
+      // Handle ZIP files
+      if (file.name.endsWith(".zip")) {
+        try {
+          const { extractZip } = await import("@/lib/zip");
+          const extracted = await extractZip(file);
+          parsed.push(...extracted);
+        } catch {
+          setError("Failed to extract ZIP file. Make sure it contains supported source code files.");
+          return;
+        }
+        continue;
+      }
+
+      if (!isSupportedFile(file.name)) {
+        setError(`Unsupported file: ${file.name}. Supported: ${SUPPORTED_EXTENSIONS.join(", ")} or .zip`);
         return;
       }
 
       const content = await file.text();
-      const lineCount = content.split("\n").length;
-
-      if (lineCount > 500) {
-        setError(`${file.name} has ${lineCount} lines (free tier limit: 500). Upgrade to Pro for larger files.`);
-        return;
-      }
-
       parsed.push({ name: file.name, content, language: getLanguage(file.name) });
+    }
+
+    if (parsed.length === 0) {
+      setError("No supported source code files found.");
+      return;
+    }
+
+    const maxFiles = tier === "free" ? 1 : tier === "pro" ? 50 : 500;
+    if (parsed.length > maxFiles) {
+      setError(`${tier} tier supports up to ${maxFiles} file(s). Found ${parsed.length}. ${tier === "free" ? "Upgrade to Pro for full repo scans." : "Upgrade to Enterprise."}`);
+      return;
     }
 
     setSelectedFiles(parsed.map((f) => f.name));
     onFilesSelected(parsed);
-  }, [onFilesSelected]);
+  }, [onFilesSelected, tier]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -81,7 +104,7 @@ export default function FileUploader({ onFilesSelected, disabled }: FileUploader
           id="file-input"
           type="file"
           multiple
-          accept={SUPPORTED_EXTENSIONS.join(",")}
+          accept={[...SUPPORTED_EXTENSIONS, ".zip"].join(",")}
           onChange={handleChange}
           className="hidden"
         />
@@ -93,26 +116,29 @@ export default function FileUploader({ onFilesSelected, disabled }: FileUploader
         </div>
 
         <p className="text-lg font-medium text-zinc-900 mb-1">
-          Drop your code file here
+          Drop your code files or ZIP here
         </p>
         <p className="text-sm text-zinc-500 mb-4">
-          or click to browse
+          or click to browse &middot; {tier === "free" ? "1 file" : tier === "pro" ? "up to 50 files" : "up to 500 files"}
         </p>
         <p className="text-xs text-zinc-400">
-          Supports: Python, JavaScript, TypeScript, Go, Rust, Java, C/C++, PHP, Ruby, C#, Solidity, SQL
+          Supports: .py .js .ts .go .rs .java .c .cpp .php .rb .cs .sol .sql &middot; or .zip archive
         </p>
       </div>
 
       {selectedFiles.length > 0 && (
-        <div className="mt-4 flex flex-wrap gap-2">
-          {selectedFiles.map((name) => (
-            <div key={name} className="inline-flex items-center gap-2 bg-violet-100 text-violet-700 px-3 py-1.5 rounded-lg text-sm font-medium">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-              </svg>
-              {name}
-            </div>
-          ))}
+        <div className="mt-4">
+          <p className="text-sm text-zinc-500 mb-2">{selectedFiles.length} file(s) selected</p>
+          <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">
+            {selectedFiles.map((name) => (
+              <div key={name} className="inline-flex items-center gap-2 bg-violet-100 text-violet-700 px-3 py-1.5 rounded-lg text-sm font-medium">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                </svg>
+                {name}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

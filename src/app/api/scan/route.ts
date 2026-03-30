@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
-import { FileInput, ScanResult, Tier } from "@/lib/types";
+import { FileInput, Tier } from "@/lib/types";
 import { TIER_LIMITS } from "@/lib/constants";
-import { setScan } from "@/lib/store";
 import { runScanPipeline } from "@/lib/claude/pipeline";
 
 export const maxDuration = 60;
@@ -19,7 +18,7 @@ export async function POST(request: NextRequest) {
 
   if (files.length > limits.maxFiles) {
     return NextResponse.json(
-      { error: `Free tier limited to ${limits.maxFiles} file(s). Upgrade to Pro for full repo scans.` },
+      { error: `${tier === "free" ? "Free" : "Current"} tier limited to ${limits.maxFiles} file(s). Upgrade for full repo scans.` },
       { status: 400 }
     );
   }
@@ -34,23 +33,50 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  const scanId = uuidv4();
-  const scanResult: ScanResult = {
-    id: scanId,
-    status: "pending",
-    tier,
-    createdAt: new Date().toISOString(),
-    files,
-    rankings: [],
-    vulnerabilities: [],
-    progress: 0,
-    currentStage: "Initializing scan...",
-  };
+  try {
+    const { rankings, vulnerabilities } = await runScanPipeline(files, tier);
 
-  setScan(scanId, scanResult);
+    const gatedVulnerabilities = vulnerabilities.map((v, index) => {
+      const isGated = index >= limits.maxDetailedVulns;
+      return {
+        id: v.id,
+        title: v.title,
+        severity: v.severity,
+        confidence: v.confidence,
+        fileName: v.fileName,
+        lineStart: v.lineStart,
+        lineEnd: v.lineEnd,
+        category: v.category,
+        description: isGated ? "" : v.description,
+        vulnerableCode: isGated ? "" : v.vulnerableCode,
+        exploitPoC: limits.showExploitPoC ? v.exploitPoC : "",
+        fixedCode: limits.showFixedCode ? v.fixedCode : "",
+        fixExplanation: limits.showFixedCode ? v.fixExplanation : "",
+        isGated,
+        isPoCGated: !limits.showExploitPoC,
+        isFixGated: !limits.showFixedCode,
+      };
+    });
 
-  // Run pipeline in background (don't await)
-  runScanPipeline(scanId, files, tier).catch(console.error);
-
-  return NextResponse.json({ scanId });
+    return NextResponse.json({
+      id: uuidv4(),
+      status: "complete",
+      tier,
+      createdAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      rankings,
+      vulnerabilities: gatedVulnerabilities,
+      totalVulnerabilities: vulnerabilities.length,
+      severityCounts: {
+        critical: vulnerabilities.filter((v) => v.severity === "critical").length,
+        high: vulnerabilities.filter((v) => v.severity === "high").length,
+        medium: vulnerabilities.filter((v) => v.severity === "medium").length,
+        low: vulnerabilities.filter((v) => v.severity === "low").length,
+        info: vulnerabilities.filter((v) => v.severity === "info").length,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Scan failed";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }
