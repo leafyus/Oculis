@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useSession } from "next-auth/react";
 import Link from "next/link";
 import FileUploader from "@/components/scan/FileUploader";
 import GitHubInput from "@/components/scan/GitHubInput";
@@ -42,13 +43,30 @@ interface ScanResultData {
   severityCounts: Record<string, number>;
 }
 
+const TIER_DESCRIPTIONS: Record<string, string> = {
+  free: "1 file · 500 lines · 3 scans/month",
+  pro: "50 files · full reports with exploit PoC + fixes",
+  enterprise: "500+ files · unlimited scans · API access",
+};
+
 export default function ScanPage() {
+  const { data: session } = useSession();
   const [files, setFiles] = useState<ParsedFile[]>([]);
-  const [tier, setTier] = useState<Tier>("free");
   const [tab, setTab] = useState<"upload" | "github">("upload");
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ScanResultData | null>(null);
+
+  // Derive tier from session (admin gets enterprise display)
+  const sessionTier = session?.user?.role === "admin"
+    ? "enterprise"
+    : (session?.user?.tier as Tier | undefined) ?? "free";
+
+  const [displayTier, setDisplayTier] = useState<string>("free");
+
+  useEffect(() => {
+    if (session) setDisplayTier(sessionTier);
+  }, [session, sessionTier]);
 
   const handleScan = async () => {
     if (files.length === 0) return;
@@ -61,7 +79,7 @@ export default function ScanPage() {
       const res = await fetch("/api/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ files, tier }),
+        body: JSON.stringify({ files }),
       });
 
       const data = await res.json();
@@ -71,11 +89,6 @@ export default function ScanPage() {
       }
 
       setResult(data);
-
-      // Store scan ID in localStorage for dashboard
-      const stored = JSON.parse(localStorage.getItem("oculis_scans") || "[]");
-      stored.unshift(data.id);
-      localStorage.setItem("oculis_scans", JSON.stringify(stored.slice(0, 50)));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -89,23 +102,30 @@ export default function ScanPage() {
     setError(null);
   };
 
-  // Show results if scan is complete
+  // Show results
   if (result) {
     const severityOrder: Severity[] = ["critical", "high", "medium", "low", "info"];
+    const effectiveTier = result.tier;
 
     return (
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-zinc-900">Security Audit Report</h1>
           <p className="text-sm text-zinc-500 mt-1">
-            Scan ID: {result.id.slice(0, 8)}... &middot; Completed {new Date(result.completedAt).toLocaleString()}
+            Scan ID: {result.id.slice(0, 8)}… · Completed{" "}
+            {new Date(result.completedAt).toLocaleString()}
           </p>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-8">
           {severityOrder.map((severity) => (
-            <div key={severity} className="bg-white border border-zinc-200 rounded-xl p-4 text-center">
-              <div className="text-2xl font-bold text-zinc-900">{result.severityCounts[severity] || 0}</div>
+            <div
+              key={severity}
+              className="bg-white border border-zinc-200 rounded-xl p-4 text-center"
+            >
+              <div className="text-2xl font-bold text-zinc-900">
+                {result.severityCounts[severity] || 0}
+              </div>
               <SeverityBadge severity={severity} />
             </div>
           ))}
@@ -114,17 +134,18 @@ export default function ScanPage() {
         <div className="bg-white border border-zinc-200 rounded-xl p-6 mb-8 flex items-center justify-between">
           <div>
             <h2 className="text-xl font-bold text-zinc-900">
-              {result.totalVulnerabilities} {result.totalVulnerabilities === 1 ? "Vulnerability" : "Vulnerabilities"} Found
+              {result.totalVulnerabilities}{" "}
+              {result.totalVulnerabilities === 1 ? "Vulnerability" : "Vulnerabilities"} Found
             </h2>
             <p className="text-sm text-zinc-500 mt-1">
-              {result.tier === "free"
+              {effectiveTier === "free"
                 ? "Free tier — first 2 findings shown in detail. Upgrade for full access."
-                : `${result.tier} tier — full access to all findings`}
+                : `${effectiveTier} tier — full access to all findings`}
             </p>
           </div>
-          {result.tier === "free" && result.totalVulnerabilities > 0 && (
+          {effectiveTier === "free" && result.totalVulnerabilities > 0 && (
             <Link
-              href="/pricing"
+              href="/billing"
               className="bg-violet-600 hover:bg-violet-700 text-white px-6 py-2.5 rounded-xl text-sm font-semibold transition-colors shrink-0"
             >
               Upgrade to Pro
@@ -150,16 +171,17 @@ export default function ScanPage() {
           </div>
         )}
 
-        {result.tier === "free" && result.totalVulnerabilities > 2 && (
+        {effectiveTier === "free" && result.totalVulnerabilities > 2 && (
           <div className="mt-8 bg-gradient-to-r from-violet-600 to-indigo-600 rounded-2xl p-8 text-center text-white">
             <h3 className="text-xl font-bold mb-2">
               We found {result.totalVulnerabilities} vulnerabilities in your code
             </h3>
             <p className="text-violet-100 mb-6">
-              Upgrade to Pro to see all exploit details, get auto-generated fixes, and secure your entire codebase.
+              Upgrade to Pro to see all exploit details, get auto-generated fixes, and secure your
+              entire codebase.
             </p>
             <Link
-              href="/pricing"
+              href="/billing"
               className="inline-block bg-white text-violet-700 px-8 py-3 rounded-xl font-semibold hover:bg-violet-50 transition-colors"
             >
               Upgrade to Pro — $49/mo
@@ -185,13 +207,13 @@ export default function ScanPage() {
     );
   }
 
-  // Show scanning progress
+  // Scanning progress
   if (scanning) {
     return (
       <div className="max-w-4xl mx-auto px-4 py-16">
         <ScanProgress
           progress={50}
-          currentStage={`Scanning ${files.length} file(s) for vulnerabilities...`}
+          currentStage={`Scanning ${files.length} file(s) for vulnerabilities…`}
           status="scanning"
         />
         <p className="text-center text-sm text-zinc-500 mt-6">
@@ -201,36 +223,35 @@ export default function ScanPage() {
     );
   }
 
-  // Show scan form
+  // Scan form
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
       <div className="text-center mb-10">
         <h1 className="text-3xl font-bold text-zinc-900">Scan Your Code</h1>
         <p className="mt-3 text-zinc-600">
-          Upload files, a ZIP archive, or enter a GitHub repo URL to scan for security vulnerabilities.
+          Upload files, a ZIP archive, or enter a GitHub repo URL to scan for vulnerabilities.
         </p>
       </div>
 
-      {/* Tier Selector */}
-      <div className="flex items-center justify-center gap-2 mb-8">
-        {(["free", "pro", "enterprise"] as Tier[]).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTier(t)}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-              tier === t
-                ? "bg-violet-600 text-white"
-                : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
-            }`}
+      {/* Plan indicator */}
+      <div className="flex items-center justify-center gap-3 mb-8">
+        <div className="inline-flex items-center gap-2 px-4 py-2 bg-zinc-100 rounded-lg">
+          <span className="text-sm text-zinc-500">Your plan:</span>
+          <span className="text-sm font-semibold text-zinc-900 capitalize">
+            {session?.user?.role === "admin" ? "Admin (Enterprise)" : displayTier}
+          </span>
+        </div>
+        {displayTier === "free" && (
+          <Link
+            href="/billing"
+            className="text-sm text-violet-600 hover:text-violet-700 font-medium"
           >
-            {t === "free" ? "Free" : t === "pro" ? "Pro ($49/mo)" : "Enterprise ($299/mo)"}
-          </button>
-        ))}
+            Upgrade →
+          </Link>
+        )}
       </div>
       <p className="text-center text-xs text-zinc-400 -mt-4 mb-8">
-        {tier === "free" ? "1 file, 500 lines max, 3 scans/month" :
-         tier === "pro" ? "Up to 50 files, full reports with exploit PoC + fixes" :
-         "Unlimited files, API access, CI/CD integration"}
+        {TIER_DESCRIPTIONS[displayTier] ?? ""}
       </p>
 
       {/* Source Tabs */}
@@ -258,7 +279,11 @@ export default function ScanPage() {
       </div>
 
       {tab === "upload" ? (
-        <FileUploader onFilesSelected={setFiles} disabled={scanning} tier={tier} />
+        <FileUploader
+          onFilesSelected={setFiles}
+          disabled={scanning}
+          tier={sessionTier}
+        />
       ) : (
         <GitHubInput onFilesLoaded={setFiles} disabled={scanning} />
       )}
@@ -279,7 +304,9 @@ export default function ScanPage() {
               : "bg-violet-600 hover:bg-violet-700 text-white shadow-lg shadow-violet-200"
           }`}
         >
-          Scan {files.length > 0 ? `${files.length} File${files.length > 1 ? "s" : ""}` : ""} for Vulnerabilities
+          Scan{" "}
+          {files.length > 0 ? `${files.length} File${files.length > 1 ? "s" : ""}` : ""}{" "}
+          for Vulnerabilities
         </button>
       </div>
 
@@ -287,10 +314,18 @@ export default function ScanPage() {
         <h3 className="font-semibold text-zinc-900 mb-3">What we scan for</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-zinc-600">
           {[
-            "SQL Injection", "Cross-Site Scripting (XSS)", "Command Injection",
-            "Broken Authentication", "IDOR / Access Control", "Path Traversal",
-            "Race Conditions", "Insecure Deserialization", "Hardcoded Secrets",
-            "Buffer Overflow", "Cryptographic Weaknesses", "Business Logic Flaws",
+            "SQL Injection",
+            "Cross-Site Scripting (XSS)",
+            "Command Injection",
+            "Broken Authentication",
+            "IDOR / Access Control",
+            "Path Traversal",
+            "Race Conditions",
+            "Insecure Deserialization",
+            "Hardcoded Secrets",
+            "Buffer Overflow",
+            "Cryptographic Weaknesses",
+            "Business Logic Flaws",
           ].map((item) => (
             <div key={item} className="flex items-center gap-2">
               <svg className="w-4 h-4 text-violet-500 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">

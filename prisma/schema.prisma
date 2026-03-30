@@ -1,0 +1,38 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id                   String   @id @default(cuid())
+  email                String   @unique
+  name                 String?
+  passwordHash         String
+  role                 String   @default("user")
+  tier                 String   @default("free")
+  scansThisMonth       Int      @default(0)
+  lastScanReset        DateTime @default(now())
+  stripeCustomerId     String?  @unique
+  stripeSubscriptionId String?  @unique
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  scans                Scan[]
+}
+
+model Scan {
+  id                   String    @id @default(cuid())
+  userId               String
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tier                 String
+  status               String    @default("complete")
+  fileCount            Int       @default(0)
+  totalVulnerabilities Int       @default(0)
+  severityCounts       String    @default("{}")
+  result               String    @default("{}")
+  createdAt            DateTime  @default(now())
+  completedAt          DateTime?
+}

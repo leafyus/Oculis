@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSession } from "next-auth/react";
 import Link from "next/link";
 import SeverityBadge from "@/components/scan/SeverityBadge";
 import { Severity } from "@/lib/types";
@@ -9,47 +10,59 @@ interface ScanSummary {
   id: string;
   status: string;
   tier: string;
+  fileCount: number;
   createdAt: string;
   completedAt?: string;
   totalVulnerabilities: number;
   severityCounts: Record<string, number>;
 }
 
+interface UserInfo {
+  tier: string;
+  role: string;
+  scansThisMonth: number;
+}
+
+const SCAN_LIMITS: Record<string, number> = {
+  free: 3,
+  pro: 50,
+  enterprise: Infinity,
+};
+
 export default function DashboardPage() {
+  const { data: session } = useSession();
   const [scans, setScans] = useState<ScanSummary[]>([]);
+  const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // For MVP, we store scan IDs in localStorage and fetch each
-    const storedIds = JSON.parse(localStorage.getItem("oculis_scans") || "[]") as string[];
-
-    if (storedIds.length === 0) {
+    Promise.all([
+      fetch("/api/user/scans").then((r) => r.json()),
+      fetch("/api/user").then((r) => r.json()),
+    ]).then(([scansData, userData]) => {
+      setScans(Array.isArray(scansData) ? scansData : []);
+      setUserInfo(userData);
       setLoading(false);
-      return;
-    }
-
-    Promise.all(
-      storedIds.map(async (id) => {
-        try {
-          const res = await fetch(`/api/scan/${id}`);
-          if (!res.ok) return null;
-          return await res.json();
-        } catch {
-          return null;
-        }
-      })
-    ).then((results) => {
-      setScans(results.filter(Boolean) as ScanSummary[]);
-      setLoading(false);
-    });
+    }).catch(() => setLoading(false));
   }, []);
+
+  const isAdmin = userInfo?.role === "admin";
+  const tier = isAdmin ? "enterprise" : (userInfo?.tier ?? "free");
+  const scanLimit = SCAN_LIMITS[tier];
+  const scansUsed = userInfo?.scansThisMonth ?? 0;
+
+  const tierLabel = isAdmin
+    ? "Admin — Enterprise"
+    : tier.charAt(0).toUpperCase() + tier.slice(1);
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-3xl font-bold text-zinc-900">Dashboard</h1>
-          <p className="text-sm text-zinc-500 mt-1">Your recent security scans</p>
+          <p className="text-sm text-zinc-500 mt-1">
+            {session?.user?.email}
+          </p>
         </div>
         <Link
           href="/scan"
@@ -59,33 +72,39 @@ export default function DashboardPage() {
         </Link>
       </div>
 
-      {/* Usage */}
+      {/* Usage card */}
       <div className="bg-white border border-zinc-200 rounded-xl p-6 mb-8">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="font-semibold text-zinc-900">Free Tier</h2>
+            <h2 className="font-semibold text-zinc-900">{tierLabel}</h2>
             <p className="text-sm text-zinc-500 mt-1">
-              {scans.length} of 3 scans used this month
+              {scanLimit === Infinity
+                ? `${scansUsed} scans used this month (unlimited)`
+                : `${scansUsed} of ${scanLimit} scans used this month`}
             </p>
           </div>
-          <Link
-            href="/pricing"
-            className="text-sm text-violet-600 hover:text-violet-700 font-medium"
-          >
-            Upgrade to Pro
-          </Link>
+          {!isAdmin && tier !== "enterprise" && (
+            <Link
+              href="/billing"
+              className="text-sm text-violet-600 hover:text-violet-700 font-medium"
+            >
+              Upgrade Plan
+            </Link>
+          )}
         </div>
-        <div className="mt-3 bg-zinc-100 rounded-full h-2 overflow-hidden">
-          <div
-            className="bg-violet-600 h-full rounded-full transition-all"
-            style={{ width: `${Math.min((scans.length / 3) * 100, 100)}%` }}
-          />
-        </div>
+        {scanLimit !== Infinity && (
+          <div className="mt-3 bg-zinc-100 rounded-full h-2 overflow-hidden">
+            <div
+              className="bg-violet-600 h-full rounded-full transition-all"
+              style={{ width: `${Math.min((scansUsed / scanLimit) * 100, 100)}%` }}
+            />
+          </div>
+        )}
       </div>
 
       {/* Scan History */}
       {loading ? (
-        <div className="text-center py-12 text-zinc-500">Loading scan history...</div>
+        <div className="text-center py-12 text-zinc-500">Loading scan history…</div>
       ) : scans.length === 0 ? (
         <div className="bg-zinc-50 border border-zinc-200 rounded-xl p-12 text-center">
           <div className="w-16 h-16 bg-zinc-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
@@ -94,7 +113,9 @@ export default function DashboardPage() {
             </svg>
           </div>
           <h3 className="text-lg font-semibold text-zinc-900 mb-2">No scans yet</h3>
-          <p className="text-zinc-500 text-sm mb-6">Upload a code file to run your first security audit.</p>
+          <p className="text-zinc-500 text-sm mb-6">
+            Upload a code file to run your first security audit.
+          </p>
           <Link
             href="/scan"
             className="bg-violet-600 hover:bg-violet-700 text-white px-6 py-2.5 rounded-xl text-sm font-semibold transition-colors"
@@ -105,22 +126,35 @@ export default function DashboardPage() {
       ) : (
         <div className="space-y-3">
           {scans.map((scan) => (
-            <Link
+            <div
               key={scan.id}
-              href={`/scan/${scan.id}`}
               className="block bg-white border border-zinc-200 rounded-xl p-5 hover:border-violet-300 hover:shadow-md transition-all"
             >
               <div className="flex items-center justify-between">
                 <div>
                   <div className="flex items-center gap-3">
-                    <span className="font-mono text-sm text-zinc-900">{scan.id.slice(0, 8)}...</span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full ${
-                      scan.status === "complete" ? "bg-green-100 text-green-700" :
-                      scan.status === "error" ? "bg-red-100 text-red-700" :
-                      "bg-yellow-100 text-yellow-700"
-                    }`}>
+                    <span className="font-mono text-sm text-zinc-900">
+                      {scan.id.slice(0, 8)}…
+                    </span>
+                    <span
+                      className={`text-xs px-2 py-0.5 rounded-full ${
+                        scan.status === "complete"
+                          ? "bg-green-100 text-green-700"
+                          : scan.status === "error"
+                          ? "bg-red-100 text-red-700"
+                          : "bg-yellow-100 text-yellow-700"
+                      }`}
+                    >
                       {scan.status}
                     </span>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-600 capitalize">
+                      {scan.tier}
+                    </span>
+                    {scan.fileCount > 0 && (
+                      <span className="text-xs text-zinc-400">
+                        {scan.fileCount} file{scan.fileCount !== 1 ? "s" : ""}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-zinc-500 mt-1">
                     {new Date(scan.createdAt).toLocaleString()}
@@ -134,7 +168,9 @@ export default function DashboardPage() {
                       if (count === 0) return null;
                       return (
                         <div key={sev} className="flex items-center gap-1">
-                          <span className="text-sm font-semibold text-zinc-900">{count}</span>
+                          <span className="text-sm font-semibold text-zinc-900">
+                            {count}
+                          </span>
                           <SeverityBadge severity={sev} />
                         </div>
                       );
@@ -145,7 +181,7 @@ export default function DashboardPage() {
                   </div>
                 )}
               </div>
-            </Link>
+            </div>
           ))}
         </div>
       )}
