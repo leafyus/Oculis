@@ -1,7 +1,7 @@
 import { auth } from "@/auth";
 import { NextResponse } from "next/server";
 
-export default auth((req) => {
+export const proxy = auth((req) => {
   const { auth: session, nextUrl } = req;
   const isProtected =
     nextUrl.pathname.startsWith("/scan") ||
